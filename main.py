@@ -73,22 +73,22 @@ DATASETS = {
         "drop_cols": {"geometry", "lat", "lon", "h3_res"},
     },
     "building": {
-        "src": f"{S3_BUCKET}/walkthru-earth/indices/building/h3",
+        "src": f"{S3_BUCKET}/walkthru-earth/indices/building/v1/h3",
         "dst": f"{S3_BUCKET}/walkthru-earth/indices/building/v2/h3",
         "partitions": [f"h3_res={r}" for r in range(3, 9)],
         "drop_cols": {"geometry", "lat", "lon", "area_km2", "h3_res"},
     },
     "population": {
-        "src": f"{S3_BUCKET}/walkthru-earth/indices/population/scenario=SSP2",
+        "src": f"{S3_BUCKET}/walkthru-earth/indices/population/v1/scenario=SSP2",
         "dst": f"{S3_BUCKET}/walkthru-earth/indices/population/v2/scenario=SSP2",
         "partitions": [f"h3_res={r}" for r in range(1, 9)],
-        "drop_cols": {"geometry", "lat", "lon", "area_km2", "h3_res"},
+        "drop_cols": {"geometry", "lat", "lon", "area_km2", "h3_res", "scenario"},
     },
     "weather": {
         "src": f"{S3_BUCKET}/walkthru-earth/indices/weather",
         "dst": f"{S3_BUCKET}/walkthru-earth/indices/weather/v2",
         "partitions": None,  # discovered dynamically
-        "drop_cols": {"geometry", "lat", "lon", "area_km2", "h3_res"},
+        "drop_cols": {"geometry", "lat", "lon", "area_km2", "h3_res", "model", "date", "hour"},
     },
 }
 
@@ -153,7 +153,7 @@ def get_columns(con: duckdb.DuckDBPyConnection, s3_uri: str) -> list[str]:
     """Get column names from a Parquet file via DESCRIBE."""
     rows = con.execute(f"""
         SELECT column_name
-        FROM (DESCRIBE SELECT * FROM read_parquet('{s3_uri}'))
+        FROM (DESCRIBE SELECT * FROM read_parquet('{s3_uri}', hive_partitioning=false))
     """).fetchall()
     return [r[0] for r in rows]
 
@@ -162,7 +162,7 @@ def get_h3_type(con: duckdb.DuckDBPyConnection, s3_uri: str) -> str:
     """Return the DuckDB type name of h3_index column."""
     try:
         row = con.execute(f"""
-            SELECT typeof(h3_index) FROM read_parquet('{s3_uri}') LIMIT 1
+            SELECT typeof(h3_index) FROM read_parquet('{s3_uri}', hive_partitioning=false) LIMIT 1
         """).fetchone()
         return row[0] if row else "UNKNOWN"
     except Exception:
@@ -176,12 +176,18 @@ def build_select_sql(
     columns = get_columns(con, s3_uri)
     h3_type = get_h3_type(con, s3_uri)
 
+    # Reserved words that need quoting in SQL
+    reserved = {"date", "hour", "model", "timestamp", "index", "type", "order", "group"}
+
     parts = []
     for col in columns:
         if col in drop_cols:
             continue
         if col == "h3_index" and "VARCHAR" in h3_type:
-            parts.append("h3_string_to_h3(h3_index) AS h3_index")
+            # Convert hex string to int64 using pure SQL (no h3 extension needed)
+            parts.append("('0x' || h3_index)::BIGINT AS h3_index")
+        elif col.lower() in reserved:
+            parts.append(f'"{col}"')
         else:
             parts.append(col)
 
@@ -237,7 +243,7 @@ def migrate_static(
         query = f"""
             COPY (
                 SELECT {select_sql}
-                FROM read_parquet('{src_uri}')
+                FROM read_parquet('{src_uri}', hive_partitioning=false)
                 ORDER BY h3_index
             ) TO '{dst_uri}'
             (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3,
@@ -256,7 +262,7 @@ def migrate_static(
 
         # Verify output
         row_count = con.execute(f"""
-            SELECT count(*) FROM read_parquet('{dst_uri}')
+            SELECT count(*) FROM read_parquet('{dst_uri}', hive_partitioning=false)
         """).fetchone()[0]
 
         log.info(
@@ -369,7 +375,7 @@ def migrate_weather(
         con.execute(query)
 
         row_count = con.execute(f"""
-            SELECT count(*) FROM read_parquet('{dst_uri}')
+            SELECT count(*) FROM read_parquet('{dst_uri}', hive_partitioning=false)
         """).fetchone()[0]
 
         log.info(
@@ -408,7 +414,7 @@ def validate(con: duckdb.DuckDBPyConnection, dataset: str) -> None:
                    typeof(h3_index) AS h3_type,
                    min(h3_index) AS h3_min,
                    max(h3_index) AS h3_max
-            FROM read_parquet('{uri}')
+            FROM read_parquet('{uri}', hive_partitioning=false)
         """).fetchone()
 
         status = "OK" if ("BIGINT" in h3_type and not has_redundant) else "NEEDS MIGRATION"
