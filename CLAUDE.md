@@ -78,7 +78,7 @@ All on `s3://us-west-2.opendata.source.coop/walkthru-earth/`.
 ### Population (res 1-8)
 `h3_index` (BIGINT), `pop_2025` (FLOAT), `pop_2030` (FLOAT), ..., `pop_2100` (FLOAT)
 
-### Weather (res 0-5, daily)
+### Weather (res 1-5, daily)
 `h3_index` (BIGINT), `timestamp` (TIMESTAMP), `temperature_2m_C` (FLOAT), `wind_speed_10m_ms` (FLOAT), ... (27 weather columns)
 
 ## Browser consumption pattern
